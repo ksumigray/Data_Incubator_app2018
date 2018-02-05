@@ -1,0 +1,156 @@
+---
+title: "Sumigray_Data_incubator_app"
+author: "Kaelyn Sumigray"
+date: "2/4/2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message=FALSE, warning = FALSE)
+```
+
+## Summary
+
+In this analysis, I have utilized data from the Murder Accountability Project, which is a dataset of murders from 1976 to 2015 that was compiled from FBI files and unreported murders. Data can be downloaded at http://www.murderdata.org/p/data-docs.html
+
+```{r load_packages}
+library(tmap)
+library(tmaptools)
+library(sf)
+library(leaflet)
+library(scales)
+library(rgdal)
+library(gridExtra)
+library(caret)
+library(htmlTable)
+library(dplyr)
+library(reshape2)
+library(mapview)
+```
+
+```{r load_data, cache=TRUE}
+murder <- read.csv("/Users/kaelyn/Data_incubator_app/SHR1976_2015.csv")
+```
+
+I am interesting in identifying factors that have led to the increase in the percentage of unsolved murder cases in the United States. First, I will identify states that have shown recent improvements in their solve rates, and states that have actually shown a recent decrease in their solve rate.
+
+```{r state_maps}
+solved_by_state <- dcast(murder, State ~ Solved)
+solved_by_state$Percent_unsolved <- (solved_by_state$No/(solved_by_state$Yes + solved_by_state$No))*100
+solved_by_state$State <- as.character(solved_by_state$State)
+solved_by_state$State[40] <- "Rhode Island"
+
+
+states <- readOGR("/Users/kaelyn/data_incubator_2018/cb_2016_us_state_20m/cb_2016_us_state_20m.shp",
+                  layer= "cb_2016_us_state_20m", GDAL1_integer64_policy=TRUE)
+states <- states[-c(47),]
+states$NAME <- as.character(states$NAME)
+statemap <- append_data(states, solved_by_state, key.shp="NAME", key.data="State")
+unsolvedPalette <- colorNumeric(palette = "OrRd", domain=statemap$Percent_unsolved)
+statemarkers <- paste("State: ", statemap$NAME,
+                      "Percent unsolved: ", statemap$Percent_unsolved)
+m <- leaflet(statemap) %>% 
+        setView(-96, 32.8, 2.5) %>%
+        addPolygons(color = ~unsolvedPalette(statemap$Percent_unsolved), weight = 1, smoothFactor = 0.5,
+        popup = statemarkers, opacity = 1.0, fillOpacity = 0.8, 
+        highlightOptions = highlightOptions(color = "white", weight = 2,
+        bringToFront = TRUE)) %>%
+        addLegend("bottomleft", pal=unsolvedPalette, values = ~statemap$Percent_unsolved, title="% unsolved murders, 1976-2015", opacity = 0.5, labFormat = labelFormat(suffix="%", digits=3))
+
+recent <- subset(murder, Year >= 2005)
+recent_by_state <- dcast(recent, State ~ Solved)
+recent_by_state$Percent_unsolved <- (recent_by_state$No/(recent_by_state$Yes + recent_by_state$No))*100
+recent_by_state$State <- as.character(recent_by_state$State)
+recent_by_state$State[40] <- "Rhode Island"
+
+recentmap <- append_data(states, recent_by_state, key.shp="NAME", key.data="State")
+recentmarkers <- paste("State: ", recentmap$NAME,
+                      "Percent unsolved: ", recentmap$Percent_unsolved)
+recentPalette <- colorNumeric(palette = "OrRd", domain=recentmap$Percent_unsolved)
+n<- leaflet(recentmap) %>% 
+        setView(-96, 32.8, 2.5) %>%
+        addPolygons(color = ~recentPalette(recentmap$Percent_unsolved), weight = 1, smoothFactor = 0.5,
+                    popup = recentmarkers, opacity = 1.0, fillOpacity = 0.8, 
+                    highlightOptions = highlightOptions(color = "white", weight = 2,
+                                                        bringToFront = TRUE)) %>%
+        addLegend("bottomleft", pal=recentPalette, values = ~recentmap$Percent_unsolved, title="% unsolved murders, 2005-2015", opacity = 0.5, labFormat = labelFormat(suffix="%", digits=3))
+sync(m, n)
+```
+
+So, we can see that several states, including NY, have improved over recent years compared to their historic average, but some states have a worse percentage of solved rates than their historic average.
+```{r historic_v_recent}
+historic_v_recent <- merge(solved_by_state, recent_by_state, by="State")
+historic_v_recent$Percent_improved <- historic_v_recent$Percent_unsolved.x - historic_v_recent$Percent_unsolved.y
+historic_v_recent <- arrange(historic_v_recent, desc(Percent_improved))
+htmlTable(head(historic_v_recent))
+htmlTable(tail(historic_v_recent))
+```
+
+In these data frames, negative values for Percent_improved equal a decrease in solved rate, while positive numbers represent an improvement and increase in percentage of solved murders.
+Looking at the head and tail of this data frame, we can see that DC has improved the most, followed by Hawaii. New York is also in the top. At the bottom, for the poor performers, Illinois is the worst, followed by Nebraska and New Jersey.
+
+Let's look at these top three and bottom three and see if we can predict from each what murders get solved and which don't. Can we find patterns that will help improve murder solve rates?
+```{r total_murders}
+historic_improved <- murder[murder$State %in% c("District of Columbia", "Hawaii", "New York"),]
+recent_improved <- recent[recent$State %in% c("District of Columbia", "Hawaii", "New York"),]
+
+historic_worse <- murder[murder$State %in% c("Illinois", "Nebraska", "New Jersey"),]
+recent_worse <- subset(historic_worse, Year >= 2005)
+
+yesnofac <- factor(historic_improved$Solved, levels=c("Yes", "No"))
+#relevel(yesnofac, ref="Yes")
+historic_improved$Solved_numeric <- as.numeric(yesnofac)
+historic_improved2 <- data.frame(historic_improved$State, historic_improved$Year, historic_improved$Solved_numeric)
+recent_improved <- subset(historic_improved, Year >= 2005)
+
+names(historic_improved2) <- c("state", 'year', 'solved_numeric')
+historic_impr_melt <- melt(historic_improved2, id=c("state", 'year'))
+casted_hist_impr <- dcast(historic_impr_melt, state+year ~ value, sum)
+
+names(casted_hist_impr) <- c('state', 'year', 'solved', 'unsolved')
+#Because the value of unsolved was 2, we need to divide by 2 for it to actually be a count.
+casted_hist_impr$unsolved <- casted_hist_impr$unsolved/2
+casted_hist_impr$Total_murders <- casted_hist_impr$solved + casted_hist_impr$unsolved
+g <- ggplot(casted_hist_impr, aes(x=year, y=Total_murders)) + geom_line(aes(color=state))
+
+worse_yesnofac <- factor(historic_worse$Solved, levels=c("Yes", "No"))
+#relevel(worse_yesnofac, ref="Yes")
+historic_worse$Solved_numeric <- as.numeric(worse_yesnofac)
+historic_worse2 <- data.frame(historic_worse$State, historic_worse$Year, historic_worse$Solved_numeric)
+names(historic_worse2) <- c("state", 'year', 'solved_numeric')
+historic_worse_melt <- melt(historic_worse2, id=c("state", 'year'))
+casted_hist_worse <- dcast(historic_worse_melt, state+year ~ value, sum)
+names(casted_hist_worse) <- c('state', 'year', 'solved', 'unsolved')
+casted_hist_worse$unsolved <- casted_hist_worse$unsolved/2
+casted_hist_worse$Total_murders <- casted_hist_worse$solved + casted_hist_worse$unsolved
+h <- ggplot(casted_hist_worse, aes(x=year, y=Total_murders)) + geom_line(aes(color=state))
+grid.arrange(g, h, ncol=1)
+```
+
+So while NY's improved rate of solved murders may be due to a decrease in total number of murders, it doesn't seem to be the case for the other two states. Similarly, it doesn't seem that the poor performers had a decreased performance rate because of an increase in total number of murders. 
+So what type of murders are being committed in these states? Total and unsolved. Historic and recent.
+
+```{r weapons}
+recent_impr_unsolved <- recent_improved[recent_improved$Solved_numeric == 2,]
+recent_impr_uns_melt <- melt(recent_impr_unsolved, id=c("Year", "Weapon"))
+recent_impr_uns_melt$value <- 1
+recent_impr_unso_cast <- dcast(recent_impr_uns_melt, Year+Weapon ~ value, sum)
+names(recent_impr_unso_cast) <- c("Year", "Weapon", "Total_Unsolved")
+recent_impr_unso_cast_sub <- recent_impr_unso_cast[recent_impr_unso_cast$Total_Unsolved != 0,]
+recent_impr_unso_cast_sub <- recent_impr_unso_cast_sub[recent_impr_unso_cast_sub$Weapon != "Explosives",]
+
+j <- ggplot(recent_impr_unso_cast_sub, aes(x=Year, y=Total_Unsolved))
+j <- j + geom_line(aes(color=Weapon))
+
+recent_worse_unsolved <- recent_worse[recent_worse$Solved == "No",]
+recent_wors_uns_melt <- melt(recent_worse_unsolved, id=c("Year", "Weapon"))
+recent_wors_uns_melt$value <- 1
+recent_worse_uns_cast <- dcast(recent_wors_uns_melt, Year+Weapon ~ value, sum)
+names(recent_worse_uns_cast) <- c("Year", "Weapon", "Total_Unsolved")
+recent_wors_cast_sub <- recent_worse_uns_cast[recent_worse_uns_cast$Total_Unsolved != 0,]
+k <- ggplot(recent_wors_cast_sub, aes(x=Year, y=Total_Unsolved))
+k <- k + geom_line(aes(color=Weapon))
+grid.arrange(j, k, ncol=1)
+```
+
+Clearly the states that have decreased solve rates have a problem with solving murders that involved handguns. It actually makes up almost all of the unsolved cases. In the future, I will look at potential factors surrounding this large amount of unsolved murder cases involving handguns. Perhaps there are different gun laws in these states, poverty levels, socioeconomic status, or police department budgets/allocation of funding that could account for these differences.
